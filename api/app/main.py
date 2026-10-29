@@ -124,6 +124,7 @@ class SendIn(BaseModel):
     lang: str = "es"
     params: list[str] = []  # cloud. "{name}" vira o nome do estabelecimento de cada lead
     text: str | None = None  # evolution. Se vazio, lê templates/<template>.txt. "{name}" vira o nome do estabelecimento
+    with_pdf: bool = False  # manda o PDF junto da mensagem 1 (evolution: logo depois do texto; cloud: no cabeçalho do template)
     limit: int = Field(20, ge=1, le=100)
     dry_run: bool = True
 
@@ -194,6 +195,11 @@ def send_messages(body: SendIn):
     if not body.dry_run:
         require_configured()
     text = load_text(body) if evo else None
+    media_id, filename = None, os.path.basename(config.WA_PDF_PATH)
+    if body.with_pdf and not body.dry_run:
+        check_pdf_file()
+        if not evo:
+            media_id = pdf_media_id()
     q = {
         "consent": True,
         "opt_out": False,
@@ -214,15 +220,31 @@ def send_messages(body: SendIn):
                 wamid = whatsapp.evo_send_text(lead["phone_e164"], text.replace("{name}", clean(lead["name"])))
             else:
                 params = [clean(p.replace("{name}", lead["name"])) for p in body.params]
-                wamid = whatsapp.send_template(lead["phone_e164"], body.template, body.lang, params)
+                header = (media_id, filename) if body.with_pdf else None
+                wamid = whatsapp.send_template(lead["phone_e164"], body.template, body.lang, params, header)
         except httpx.HTTPError as e:
             failed.append({**item, "error": str(e)[:200]})
             continue
+        fields = {"last_sent_at": now(), "wamid": wamid}
+        if body.with_pdf and not evo:  # cloud: o PDF já foi no cabeçalho
+            fields.update(pdf_sent=True, pdf_sent_at=now())
         db.leads.update_many(
             {"phone_e164": lead["phone_e164"]},
-            {"$addToSet": {"sent_templates": body.template}, "$set": {"last_sent_at": now(), "wamid": wamid}},
+            {"$addToSet": {"sent_templates": body.template}, "$set": fields},
         )
         db.messages.insert_one({**item, "template": body.template, "wamid": wamid, "sent_at": now()})
+        if body.with_pdf and evo:
+            pause()
+            try:
+                dwamid = whatsapp.evo_send_document(lead["phone_e164"], config.WA_PDF_PATH, filename, config.WA_PDF_CAPTION)
+            except httpx.HTTPError as e:
+                item = {**item, "pdf": False, "pdf_error": str(e)[:200]}  # o texto já foi; /messages/send-pdf {"only_replied": false} tenta de novo
+            else:
+                db.leads.update_many(
+                    {"phone_e164": lead["phone_e164"]}, {"$set": {"pdf_sent": True, "pdf_sent_at": now()}}
+                )
+                db.messages.insert_one({**item, "type": "pdf", "wamid": dwamid, "sent_at": now()})
+                item = {**item, "pdf": True}
         done.append(item)
         pause()
     return {
@@ -235,6 +257,7 @@ def send_messages(body: SendIn):
 
 
 class SendPdfIn(BaseModel):
+    only_replied: bool = True  # false: também quem recebeu a mensagem 1 e ainda não respondeu (reenvio do PDF que falhou)
     limit: int = Field(20, ge=1, le=100)
     dry_run: bool = True
 
@@ -276,9 +299,14 @@ def send_pdf(body: SendPdfIn):
         "opt_out": False,
         "phone_e164": {"$ne": None},
         "pdf_sent": {"$ne": True},
-        "last_reply_at": {"$gte": datetime.now(timezone.utc) - timedelta(hours=168 if evo else 24)},
         **sendable_phone(),
     }
+    if body.only_replied:
+        q["last_reply_at"] = {"$gte": datetime.now(timezone.utc) - timedelta(hours=168 if evo else 24)}
+    elif evo:  # na Cloud API só a janela de 24 h permite mensagem livre
+        q["last_sent_at"] = {"$exists": True}
+    else:
+        raise HTTPException(400, "na Cloud API o PDF só sai para quem respondeu nas últimas 24 h")
     leads = unique_by_phone(q, body.limit)
     items = [
         {"place_id": l["place_id"], "name": l["name"], "phone": l["phone_e164"], "last_reply": l.get("last_reply")}

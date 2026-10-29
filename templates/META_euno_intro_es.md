@@ -26,3 +26,15 @@ use "params": ["equipo de {name}", "{name}"].
 Não é template. Só sai dentro de 24 h depois que o contato responde (regra da Meta).
 POST /messages/send-pdf {"dry_run": true}   lista quem respondeu e o que respondeu
 POST /messages/send-pdf {"dry_run": false}  sobe assets/euno_supermercados_es.pdf (uma vez) e envia
+
+=== Variante com o PDF junto (with_pdf) ===
+Nome sugerido: euno_intro_pdf
+Categoria: Marketing / Idioma: Spanish (es)
+Cabeçalho: tipo Documento (a Meta pede um PDF de exemplo na criação; use assets/euno_supermercados_es.pdf)
+Corpo: o mesmo de templates/euno_intro_pdf.txt, trocando cada {name} por {{1}} e {{2}} (primeiro e segundo)
+Rodapé: Responda BAJA para no recibir más mensajes.
+
+Envio:
+POST /messages/send
+{"template": "euno_intro_pdf", "lang": "es", "params": ["{name}", "{name}"], "with_pdf": true, "dry_run": true}
+O PDF vai no cabeçalho da própria mensagem: é uma mensagem só, sem esperar resposta.

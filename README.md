@@ -26,7 +26,10 @@ O endereço de origem fica em `.env` (`ORIGIN_ADDRESS`). Docs interativos: http:
    `{name}` vira o nome do estabelecimento de cada lead. Texto do template e como cadastrar na Meta: `templates/META_euno_intro_es.md`.
    Começa em `dry_run: true` (só lista quem receberia). Use `"dry_run": false` para enviar de verdade.
    Cada número recebe cada template uma vez só, mesmo que várias lojas o compartilhem.
-5. Mensagem 2 (PDF): `POST /messages/send-pdf`. Só vai a quem respondeu nas últimas 24 h (regra da Meta para mensagem
+   Para mandar o PDF junto, sem esperar resposta: `"with_pdf": true`. Evolution: o texto sai e o PDF logo depois
+   (use `"template": "euno_intro_pdf"`, cujo texto já diz que o PDF segue anexo). Cloud: o PDF vai no cabeçalho do
+   template, que precisa ser criado com cabeçalho de Documento (ver `templates/META_euno_intro_es.md`).
+5. Mensagem 2 (PDF) separada, só depois da resposta: `POST /messages/send-pdf`. Só vai a quem respondeu nas últimas 24 h (regra da Meta para mensagem
    fora de template). O `dry_run` (padrão) mostra a resposta de cada um; quem não quer o PDF:
    `PATCH /leads/{place_id}` `{"opt_out": true}`. O arquivo é `assets/euno_supermercados_es.pdf` (montado no container).
 6. Respostas "baja", "stop", "no", "parar", "cancelar" chegam por `/webhook/whatsapp` e tiram o número de qualquer envio.
@@ -39,7 +42,11 @@ pode levar ao banimento do número. Por isso a API trava em 30 mensagens 1 por d
 
 - Mensagem 1 sem template: `POST /messages/send` `{"template": "euno_intro_led"}` lê `templates/euno_intro_led.txt`
   (ou mande `"text"` na hora). `{name}` vira o nome do estabelecimento. O nome do template só identifica a campanha.
-- PDF: igual, `POST /messages/send-pdf`, para quem respondeu nos últimos 7 dias.
+- PDF: junto da mensagem 1 com `"with_pdf": true`, ou depois com `POST /messages/send-pdf` para quem respondeu nos
+  últimos 7 dias. Se o PDF falhar depois de o texto sair, `{"only_replied": false}` reenvia a quem ficou sem ele.
+- Quem responde: com a Evolution o número fica conectado como aparelho vinculado, então as respostas aparecem no
+  WhatsApp Business do seu pai e ele atende pelo celular. Na Cloud API sozinha (sem convivência) as respostas só
+  chegam ao webhook: o app dele não mostra a conversa.
 - Quais fixos têm WhatsApp: `POST /leads/check-whatsapp` `{"limit": 50}` pergunta à Evolution, sem enviar nada. Quem tem
   vira elegível ao envio; celular que a checagem diz não ter WhatsApp sai. Consulta em massa também chama atenção do
   WhatsApp: faça 50 por dia. `GET /leads?has_whatsapp=true` lista.

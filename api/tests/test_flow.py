@@ -277,5 +277,99 @@ def test_evolution_client_request_shapes(monkeypatch, tmp_path):
     assert calls[2][2] == {"numbers": ["34933371234", "34911111111"]}
 
 
+def test_evolution_with_pdf_sends_text_then_document(evo, monkeypatch, tmp_path):
+    pdf = tmp_path / "euno.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(main.config, "WA_PDF_PATH", str(pdf))
+    order = []
+    monkeypatch.setattr(whatsapp, "evo_send_text", lambda to, text: order.append(("text", to)) or "id.t")
+    monkeypatch.setattr(whatsapp, "evo_send_document", lambda to, *a: order.append(("pdf", to)) or "id.d")
+
+    r = evo.post("/messages/send", json={"template": "euno", "with_pdf": True, "dry_run": False, "limit": 1}).json()
+    assert order == [("text", "+34612000001"), ("pdf", "+34612000001")]
+    assert r["sent"][0]["pdf"] is True
+    # o PDF já foi: nem responder faz o send-pdf mandar de novo
+    evo_hook(evo, "34612000001@s.whatsapp.net", "sí, gracias")
+    assert evo.post("/messages/send-pdf", json={}).json()["eligible"] == 0
+
+
+def test_evolution_pdf_failure_keeps_text_and_can_be_retried(evo, monkeypatch, tmp_path):
+    import httpx
+
+    pdf = tmp_path / "euno.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(main.config, "WA_PDF_PATH", str(pdf))
+    monkeypatch.setattr(whatsapp, "evo_send_text", lambda *a: "id.t")
+    docs = []
+
+    def flaky(to, *a):
+        if not docs:
+            docs.append("falhou")
+            raise httpx.ConnectError("sem rede")
+        docs.append(to)
+        return "id.d"
+
+    monkeypatch.setattr(whatsapp, "evo_send_document", flaky)
+    body = {"template": "euno", "with_pdf": True, "dry_run": False, "limit": 1}
+    r = evo.post("/messages/send", json=body).json()
+    assert r["sent"][0]["pdf"] is False and "sem rede" in r["sent"][0]["pdf_error"]
+    second = evo.post("/messages/send", json=body).json()  # vai para outro lead; quem já recebeu o texto não repete
+    assert second["sent"][0]["phone"] == "+34612000003" and second["sent"][0]["pdf"] is True
+
+    # sem resposta ainda: só o reenvio explícito acha quem ficou sem PDF
+    assert evo.post("/messages/send-pdf", json={}).json()["eligible"] == 0
+    retry = evo.post("/messages/send-pdf", json={"only_replied": False, "dry_run": False}).json()
+    assert retry["eligible"] == 1 and docs == ["falhou", "+34612000003", "+34612000001"]
+    assert evo.post("/messages/send-pdf", json={"only_replied": False}).json()["eligible"] == 0
+
+
+def test_with_pdf_missing_file_blocks_before_any_send(evo, monkeypatch, tmp_path):
+    monkeypatch.setattr(main.config, "WA_PDF_PATH", str(tmp_path / "nao-existe.pdf"))
+    sent = []
+    monkeypatch.setattr(whatsapp, "evo_send_text", lambda *a: sent.append(a) or "id")
+    r = evo.post("/messages/send", json={"template": "euno", "with_pdf": True, "dry_run": False})
+    assert r.status_code == 400 and sent == []
+
+
+def test_cloud_with_pdf_puts_document_in_template_header(client, monkeypatch, tmp_path):
+    pdf = tmp_path / "euno.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(main.config, "WA_PDF_PATH", str(pdf))
+    monkeypatch.setattr(main.config, "WA_TOKEN", "x")
+    monkeypatch.setattr(main.config, "WA_PHONE_NUMBER_ID", "1")
+    monkeypatch.setattr(collector, "run_job", lambda body: [csv_row("a", "612 00 00 01")])
+    calls = []
+    monkeypatch.setattr(whatsapp, "send_template", lambda *a: calls.append(a) or "wamid.1")
+    monkeypatch.setattr(whatsapp, "upload_media", lambda path: "media.9")
+    client.post("/collect", json={"lat": ORIGIN[0], "lon": ORIGIN[1], "grid": 1})
+    client.patch("/leads/a", json={"consent": True, "consent_source": "visita"})
+    body = {"template": "euno_intro_pdf", "params": ["{name}", "{name}"], "with_pdf": True, "dry_run": False}
+    assert len(client.post("/messages/send", json=body).json()["sent"]) == 1
+    assert calls[0][4] == ("media.9", "euno.pdf")
+    reply(client, "34612000001", "sí")
+    assert client.post("/messages/send-pdf", json={}).json()["eligible"] == 0  # PDF já foi no cabeçalho
+    assert client.post("/messages/send-pdf", json={"only_replied": False}).status_code == 400
+
+
+def test_send_template_header_document_payload(monkeypatch):
+    for k, v in {"WA_TOKEN": "t", "WA_PHONE_NUMBER_ID": "99"}.items():
+        monkeypatch.setattr(whatsapp.config, k, v)
+    sent = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"messages": [{"id": "wamid.X"}]}
+
+    monkeypatch.setattr(whatsapp.httpx, "post", lambda url, headers, json, timeout: sent.append(json) or Resp())
+    whatsapp.send_template("+34612000001", "euno_intro_pdf", "es", ["Super a", "Super a"], ("media.9", "euno.pdf"))
+    assert sent[0]["template"]["components"] == [
+        {"type": "header", "parameters": [{"type": "document", "document": {"id": "media.9", "filename": "euno.pdf"}}]},
+        {"type": "body", "parameters": [{"type": "text", "text": "Super a"}, {"type": "text", "text": "Super a"}]},
+    ]
+
+
 def test_send_real_requires_credentials(client):
     assert client.post("/messages/send", json={"template": "t", "dry_run": False}).status_code == 400

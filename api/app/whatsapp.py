@@ -33,13 +33,20 @@ def _send(to_e164, kind, body):
     return r.json()["messages"][0]["id"]
 
 
-def send_template(to_e164, template, lang, params=()):
-    """Envia um template aprovado pela Meta (WhatsApp Cloud API). Retorna o id da mensagem."""
+def send_template(to_e164, template, lang, params=(), header_document=None):
+    """Envia um template aprovado pela Meta (WhatsApp Cloud API). Retorna o id da mensagem.
+    header_document=(media_id, filename) manda o PDF junto, num template criado com cabeçalho do tipo Documento."""
     template_body = {"name": template, "language": {"code": lang}}
+    components = []
+    if header_document:
+        media_id, filename = header_document
+        components.append(
+            {"type": "header", "parameters": [{"type": "document", "document": {"id": media_id, "filename": filename}}]}
+        )
     if params:
-        template_body["components"] = [
-            {"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}
-        ]
+        components.append({"type": "body", "parameters": [{"type": "text", "text": p} for p in params]})
+    if components:
+        template_body["components"] = components
     return _send(to_e164, "template", template_body)
 
 
