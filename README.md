@@ -38,7 +38,8 @@ O endereço de origem fica em `.env` (`ORIGIN_ADDRESS`). Docs interativos: http:
 ## Testes
 
 ```bash
-cd api && pip install -r requirements-dev.txt && pytest
+pip install -r requirements.txt
+cd api && pytest
 ```
 
 Os testes cobrem geometria, telefone, filtro de raio, trava de consentimento, envio e opt-out, com Mongo

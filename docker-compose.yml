@@ -21,7 +21,9 @@ services:
       - mongo_data:/data/db
 
   api:
-    build: ./api
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     restart: unless-stopped
     env_file: .env
     environment:
