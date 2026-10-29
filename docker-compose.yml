@@ -1,0 +1,39 @@
+# Motor de coleta: imagem oficial gosom/google-maps-scraper (MIT), sem autenticação.
+# Fica só em 127.0.0.1; nunca publicar em 0.0.0.0 sem proxy com auth.
+services:
+  scraper:
+    image: gosom/google-maps-scraper:v1.18.1
+    platform: linux/amd64   # imagem só existe em amd64; no Apple Silicon roda emulada
+    command: ["-web", "-data-folder", "/gmapsdata"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - gmaps_data:/gmapsdata
+      - gmaps_cache:/opt
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SCRAPER_URL: http://scraper:8080
+      MONGO_URL: mongodb://mongo:27017
+    depends_on:
+      - scraper
+      - mongo
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  gmaps_data:
+  gmaps_cache:
+  mongo_data:
