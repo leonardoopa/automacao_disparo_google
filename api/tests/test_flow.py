@@ -60,5 +60,34 @@ def test_collect_consent_gate_and_send(client, monkeypatch):
     assert client.post("/messages/send", json={"template": "t2"}).json()["eligible"] == 0
 
 
+def test_shared_phone_gets_one_message_and_opt_out_blocks_number(client, monkeypatch):
+    rows = [csv_row("x1", "612 00 00 01"), csv_row("x2", "612 00 00 01"), csv_row("y", "612 00 00 02")]
+    monkeypatch.setattr(collector, "run_job", lambda body: rows)
+    client.post("/collect", json={"lat": ORIGIN[0], "lon": ORIGIN[1], "grid": 1})
+    for pid in ("x1", "x2", "y"):
+        client.patch(f"/leads/{pid}", json={"consent": True, "consent_source": "visita"})
+
+    dry = client.post("/messages/send", json={"template": "t"}).json()
+    assert sorted(x["phone"] for x in dry["sent"]) == ["+34612000001", "+34612000002"]
+    assert client.post("/messages/send", json={"template": "t", "limit": 2}).json()["eligible"] == 2
+
+    monkeypatch.setattr(main.config, "WA_TOKEN", "x")
+    monkeypatch.setattr(main.config, "WA_PHONE_NUMBER_ID", "1")
+    calls = []
+    monkeypatch.setattr(whatsapp, "send_template", lambda *a: calls.append(a[0]) or "wamid.1")
+    real = {"template": "t", "dry_run": False}
+    assert len(client.post("/messages/send", json=real).json()["sent"]) == 2
+    assert sorted(calls) == ["+34612000001", "+34612000002"]
+    assert client.post("/messages/send", json=real).json()["eligible"] == 0  # x2 também conta como enviado
+
+    # "BAJA" vindo do número compartilhado bloqueia as duas lojas
+    hook = {"entry": [{"changes": [{"value": {"messages": [{"from": "34612000001", "text": {"body": "baja"}}]}}]}]}
+    client.post("/webhook/whatsapp", json=hook)
+    shared = [l for l in client.get("/leads").json()["items"] if l["phone_e164"] == "+34612000001"]
+    assert len(shared) == 2 and all(l["opt_out"] for l in shared)
+    t2 = client.post("/messages/send", json={"template": "t2"}).json()
+    assert [x["phone"] for x in t2["sent"]] == ["+34612000002"]
+
+
 def test_send_real_requires_credentials(client):
     assert client.post("/messages/send", json={"template": "t", "dry_run": False}).status_code == 400

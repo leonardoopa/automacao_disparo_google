@@ -133,7 +133,16 @@ def send_messages(body: SendIn):
         "phone_e164": {"$ne": None},
         "sent_templates": {"$ne": body.template},
     }
-    leads = list(db.leads.find(q).sort("distance_km", 1).limit(body.limit))
+    # Várias lojas podem compartilhar o mesmo número: um envio por telefone, e quem saiu da lista bloqueia o número todo.
+    seen = set(db.leads.distinct("phone_e164", {"opt_out": True}))
+    leads = []
+    for lead in db.leads.find(q).sort("distance_km", 1):
+        if lead["phone_e164"] in seen:
+            continue
+        seen.add(lead["phone_e164"])
+        leads.append(lead)
+        if len(leads) == body.limit:
+            break
     done, failed = [], []
     for lead in leads:
         item = {"place_id": lead["place_id"], "name": lead["name"], "phone": lead["phone_e164"]}
@@ -145,8 +154,8 @@ def send_messages(body: SendIn):
         except httpx.HTTPError as e:
             failed.append({**item, "error": str(e)[:200]})
             continue
-        db.leads.update_one(
-            {"_id": lead["_id"]},
+        db.leads.update_many(
+            {"phone_e164": lead["phone_e164"]},
             {"$addToSet": {"sent_templates": body.template}, "$set": {"last_sent_at": now(), "wamid": wamid}},
         )
         db.messages.insert_one({**item, "template": body.template, "wamid": wamid, "sent_at": now()})
@@ -176,5 +185,5 @@ def wa_incoming(payload: dict = Body(...)):
                 fields = {"last_reply": text[:200], "last_reply_at": now()}
                 if text in config.OPT_OUT_WORDS:
                     fields["opt_out"] = True
-                db.leads.update_one({"phone_e164": "+" + str(msg.get("from", ""))}, {"$set": fields})
+                db.leads.update_many({"phone_e164": "+" + str(msg.get("from", ""))}, {"$set": fields})
     return {"ok": True}
