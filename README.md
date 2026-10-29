@@ -1,0 +1,1 @@
+# automacao_disparo_google
