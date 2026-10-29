@@ -22,10 +22,14 @@ O endereço de origem fica em `.env` (`ORIGIN_ADDRESS`). Docs interativos: http:
 2. `GET /leads?mobile_only=true` lista por distância. Fixo (prefixo 9) não recebe WhatsApp, é para ligar.
 3. Depois de o contato aceitar (ligação, visita, e-mail), registre:
    `PATCH /leads/{place_id}` `{"consent": true, "consent_source": "ligou em 29/10 e aceitou"}`
-4. `POST /messages/send` `{"template": "nome_aprovado", "lang": "es", "params": ["..."]}`.
+4. Mensagem 1: `POST /messages/send` `{"template": "euno_intro_led", "lang": "es", "params": ["{name}", "{name}"]}`.
+   `{name}` vira o nome do estabelecimento de cada lead. Texto do template e como cadastrar na Meta: `templates/euno_intro_es.txt`.
    Começa em `dry_run: true` (só lista quem receberia). Use `"dry_run": false` para enviar de verdade.
-   Cada lead recebe cada template uma vez só.
-5. Respostas "baja", "stop", "no", "parar", "cancelar" chegam por `/webhook/whatsapp` e tiram o lead de qualquer envio.
+   Cada número recebe cada template uma vez só, mesmo que várias lojas o compartilhem.
+5. Mensagem 2 (PDF): `POST /messages/send-pdf`. Só vai a quem respondeu nas últimas 24 h (regra da Meta para mensagem
+   fora de template). O `dry_run` (padrão) mostra a resposta de cada um; quem não quer o PDF:
+   `PATCH /leads/{place_id}` `{"opt_out": true}`. O arquivo é `assets/euno_supermercados_es.pdf` (montado no container).
+6. Respostas "baja", "stop", "no", "parar", "cancelar" chegam por `/webhook/whatsapp` e tiram o número de qualquer envio.
 
 ## Antes de enviar de verdade
 

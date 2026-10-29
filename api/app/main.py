@@ -1,8 +1,9 @@
+import os
 import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query
@@ -116,14 +117,33 @@ def patch_lead(place_id: str, body: LeadPatch):
 class SendIn(BaseModel):
     template: str
     lang: str = "es"
-    params: list[str] = []
+    params: list[str] = []  # "{name}" vira o nome do estabelecimento de cada lead
     limit: int = Field(20, ge=1, le=100)
     dry_run: bool = True
 
 
+def clean(text):
+    """Variável de template da Meta não aceita quebra de linha, tab nem espaços repetidos."""
+    return " ".join(str(text).split())
+
+
+def unique_by_phone(query, limit):
+    """Um lead por telefone (lojas dividem número). Número de quem saiu da lista bloqueia todas as lojas dele."""
+    seen = set(db.leads.distinct("phone_e164", {"opt_out": True}))
+    leads = []
+    for lead in db.leads.find(query).sort("distance_km", 1):
+        if lead["phone_e164"] in seen:
+            continue
+        seen.add(lead["phone_e164"])
+        leads.append(lead)
+        if len(leads) == limit:
+            break
+    return leads
+
+
 @app.post("/messages/send")
 def send_messages(body: SendIn):
-    """Envia o template só para quem tem consent, não saiu da lista, tem celular e ainda não recebeu esse template."""
+    """Mensagem 1: envia o template só para quem tem consent, não saiu da lista, tem celular e ainda não recebeu esse template."""
     if not body.dry_run and not (config.WA_TOKEN and config.WA_PHONE_NUMBER_ID):
         raise HTTPException(400, "WHATSAPP_TOKEN e WHATSAPP_PHONE_NUMBER_ID não configurados")
     q = {
@@ -133,24 +153,16 @@ def send_messages(body: SendIn):
         "phone_e164": {"$ne": None},
         "sent_templates": {"$ne": body.template},
     }
-    # Várias lojas podem compartilhar o mesmo número: um envio por telefone, e quem saiu da lista bloqueia o número todo.
-    seen = set(db.leads.distinct("phone_e164", {"opt_out": True}))
-    leads = []
-    for lead in db.leads.find(q).sort("distance_km", 1):
-        if lead["phone_e164"] in seen:
-            continue
-        seen.add(lead["phone_e164"])
-        leads.append(lead)
-        if len(leads) == body.limit:
-            break
+    leads = unique_by_phone(q, body.limit)
     done, failed = [], []
     for lead in leads:
         item = {"place_id": lead["place_id"], "name": lead["name"], "phone": lead["phone_e164"]}
         if body.dry_run:
             done.append(item)
             continue
+        params = [clean(p.replace("{name}", lead["name"])) for p in body.params]
         try:
-            wamid = whatsapp.send_template(lead["phone_e164"], body.template, body.lang, body.params)
+            wamid = whatsapp.send_template(lead["phone_e164"], body.template, body.lang, params)
         except httpx.HTTPError as e:
             failed.append({**item, "error": str(e)[:200]})
             continue
@@ -162,6 +174,69 @@ def send_messages(body: SendIn):
         done.append(item)
         time.sleep(config.SEND_DELAY_S)
     return {"dry_run": body.dry_run, "eligible": len(leads), "sent": done, "failed": failed}
+
+
+class SendPdfIn(BaseModel):
+    limit: int = Field(20, ge=1, le=100)
+    dry_run: bool = True
+
+
+def pdf_media_id():
+    """Sobe o PDF uma vez e reaproveita o media_id (a Meta guarda 30 dias; renovamos com 25)."""
+    path = config.WA_PDF_PATH
+    if not os.path.isfile(path):
+        raise HTTPException(400, f"PDF não encontrado em {path}")
+    mtime = os.path.getmtime(path)
+    cached = db.meta.find_one({"_id": "pdf_media"})
+    if cached and cached["path"] == path and cached["mtime"] == mtime and time.time() - cached["uploaded"] < 25 * 86400:
+        return cached["media_id"]
+    try:
+        media_id = whatsapp.upload_media(path)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"upload do PDF falhou: {str(e)[:200]}")
+    db.meta.replace_one(
+        {"_id": "pdf_media"},
+        {"path": path, "mtime": mtime, "media_id": media_id, "uploaded": time.time()},
+        upsert=True,
+    )
+    return media_id
+
+
+@app.post("/messages/send-pdf")
+def send_pdf(body: SendPdfIn):
+    """Mensagem 2: manda o PDF a quem respondeu nas últimas 24 h (janela da Meta para mensagem livre) e ainda não o recebeu.
+    O dry_run mostra a resposta de cada um. Quem não quer receber: PATCH /leads/{place_id} {"opt_out": true}."""
+    if not body.dry_run and not (config.WA_TOKEN and config.WA_PHONE_NUMBER_ID):
+        raise HTTPException(400, "WHATSAPP_TOKEN e WHATSAPP_PHONE_NUMBER_ID não configurados")
+    q = {
+        "consent": True,
+        "opt_out": False,
+        "is_mobile": True,
+        "phone_e164": {"$ne": None},
+        "pdf_sent": {"$ne": True},
+        "last_reply_at": {"$gte": datetime.now(timezone.utc) - timedelta(hours=24)},
+    }
+    leads = unique_by_phone(q, body.limit)
+    items = [
+        {"place_id": l["place_id"], "name": l["name"], "phone": l["phone_e164"], "last_reply": l.get("last_reply")}
+        for l in leads
+    ]
+    if body.dry_run or not leads:
+        return {"dry_run": body.dry_run, "eligible": len(leads), "sent": items if body.dry_run else [], "failed": []}
+    media_id = pdf_media_id()
+    filename = os.path.basename(config.WA_PDF_PATH)
+    done, failed = [], []
+    for lead, item in zip(leads, items):
+        try:
+            wamid = whatsapp.send_document(lead["phone_e164"], media_id, filename, config.WA_PDF_CAPTION)
+        except httpx.HTTPError as e:
+            failed.append({**item, "error": str(e)[:200]})
+            continue
+        db.leads.update_many({"phone_e164": lead["phone_e164"]}, {"$set": {"pdf_sent": True, "pdf_sent_at": now()}})
+        db.messages.insert_one({**item, "type": "pdf", "wamid": wamid, "sent_at": now()})
+        done.append(item)
+        time.sleep(config.SEND_DELAY_S)
+    return {"dry_run": False, "eligible": len(leads), "sent": done, "failed": failed}
 
 
 @app.get("/webhook/whatsapp")
