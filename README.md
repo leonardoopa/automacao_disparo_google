@@ -23,7 +23,7 @@ O endereço de origem fica em `.env` (`ORIGIN_ADDRESS`). Docs interativos: http:
 3. Depois de o contato aceitar (ligação, visita, e-mail), registre:
    `PATCH /leads/{place_id}` `{"consent": true, "consent_source": "ligou em 29/10 e aceitou"}`
 4. Mensagem 1: `POST /messages/send` `{"template": "euno_intro_led", "lang": "es", "params": ["{name}", "{name}"]}`.
-   `{name}` vira o nome do estabelecimento de cada lead. Texto do template e como cadastrar na Meta: `templates/euno_intro_es.txt`.
+   `{name}` vira o nome do estabelecimento de cada lead. Texto do template e como cadastrar na Meta: `templates/META_euno_intro_es.md`.
    Começa em `dry_run: true` (só lista quem receberia). Use `"dry_run": false` para enviar de verdade.
    Cada número recebe cada template uma vez só, mesmo que várias lojas o compartilhem.
 5. Mensagem 2 (PDF): `POST /messages/send-pdf`. Só vai a quem respondeu nas últimas 24 h (regra da Meta para mensagem
@@ -31,13 +31,31 @@ O endereço de origem fica em `.env` (`ORIGIN_ADDRESS`). Docs interativos: http:
    `PATCH /leads/{place_id}` `{"opt_out": true}`. O arquivo é `assets/euno_supermercados_es.pdf` (montado no container).
 6. Respostas "baja", "stop", "no", "parar", "cancelar" chegam por `/webhook/whatsapp` e tiram o número de qualquer envio.
 
+## Evolution API (alternativa à Cloud API)
+
+`WHATSAPP_PROVIDER=evolution` no `.env`, com `EVOLUTION_URL`, `EVOLUTION_API_KEY` e `EVOLUTION_INSTANCE` (instância já
+conectada por QR no WhatsApp Business do número remetente, em Aparelhos conectados). Não oficial: mensagem comercial fria
+pode levar ao banimento do número. Por isso a API trava em 30 mensagens 1 por dia (`DAILY_SEND_LIMIT`) e espaça os envios.
+
+- Mensagem 1 sem template: `POST /messages/send` `{"template": "euno_intro_led"}` lê `templates/euno_intro_led.txt`
+  (ou mande `"text"` na hora). `{name}` vira o nome do estabelecimento. O nome do template só identifica a campanha.
+- PDF: igual, `POST /messages/send-pdf`, para quem respondeu nos últimos 7 dias.
+- Quais fixos têm WhatsApp: `POST /leads/check-whatsapp` `{"limit": 50}` pergunta à Evolution, sem enviar nada. Quem tem
+  vira elegível ao envio; celular que a checagem diz não ter WhatsApp sai. Consulta em massa também chama atenção do
+  WhatsApp: faça 50 por dia. `GET /leads?has_whatsapp=true` lista.
+- Respostas: configure o webhook da instância para `https://<URL pública>/webhook/evolution?token=<EVOLUTION_WEBHOOK_TOKEN>`
+  com o evento `MESSAGES_UPSERT`. Contas que chegam como `@lid` sem telefone são ignoradas.
+- Escrito contra a documentação da Evolution v2 (`sendText`, `sendMedia`, `whatsappNumbers`). Os testes usam respostas
+  simuladas: ainda não rodou contra uma instância real.
+
 ## Antes de enviar de verdade
 
 - Número de WhatsApp Business na Cloud API da Meta e template aprovado. Preencha `WHATSAPP_*` no `.env`.
 - A Meta só aceita iniciar conversa com quem deu opt-in. Na Espanha, mensagem comercial sem consentimento
   também esbarra no RGPD e na LSSI. Confirme com um advogado.
-- Não use bibliotecas não oficiais de WhatsApp (risco de banimento do número).
-- O webhook não valida a assinatura da Meta. Antes de expor à internet, adicione `X-Hub-Signature-256`.
+- A Cloud API é o caminho oficial. A Evolution (e qualquer biblioteca não oficial) arrisca o banimento do número.
+- O webhook da Cloud API não valida a assinatura da Meta. Antes de expor à internet, adicione `X-Hub-Signature-256`.
+  O webhook da Evolution exige o `?token=` da URL.
 
 ## Testes
 

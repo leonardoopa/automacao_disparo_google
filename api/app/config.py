@@ -12,6 +12,16 @@ DEFAULT_KEYWORDS = [
     if k.strip()
 ]
 
+# "cloud" = API oficial da Meta (templates); "evolution" = Evolution API (QR no app, texto livre, não oficial)
+PROVIDER = os.getenv("WHATSAPP_PROVIDER", "cloud").lower()
+EVO_URL = os.getenv("EVOLUTION_URL", "").rstrip("/")
+EVO_KEY = os.getenv("EVOLUTION_API_KEY", "")
+EVO_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "")
+EVO_WEBHOOK_TOKEN = os.getenv("EVOLUTION_WEBHOOK_TOKEN", "")
+TEMPLATES_DIR = os.getenv("TEMPLATES_DIR", "/srv/templates")
+# Teto de mensagens 1 por dia (UTC). 0 = sem teto. Na Evolution o padrão é 30 para não queimar o número.
+DAILY_SEND_LIMIT = int(os.getenv("DAILY_SEND_LIMIT", "30" if PROVIDER == "evolution" else "0"))
+
 WA_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WA_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WA_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")

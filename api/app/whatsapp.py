@@ -1,8 +1,17 @@
+import base64
 import os
+import re
+from functools import lru_cache
 
 import httpx
 
 from . import config
+
+
+def configured():
+    if config.PROVIDER == "evolution":
+        return bool(config.EVO_URL and config.EVO_KEY and config.EVO_INSTANCE)
+    return bool(config.WA_TOKEN and config.WA_PHONE_NUMBER_ID)
 
 
 def _base():
@@ -54,3 +63,59 @@ def send_document(to_e164, media_id, filename, caption=""):
     if caption:
         doc["caption"] = caption
     return _send(to_e164, "document", doc)
+
+
+# --- Evolution API (v2): rotas /{recurso}/{ação}/{instância}, chave da instância no header apikey ---
+
+
+def _evo(path, payload, timeout=30):
+    r = httpx.post(
+        f"{config.EVO_URL}/{path}/{config.EVO_INSTANCE}",
+        headers={"apikey": config.EVO_KEY},
+        json=payload,
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _digits(e164):
+    return re.sub(r"\D", "", e164)
+
+
+def _msg_id(data):
+    return ((data.get("key") or {}).get("id") or data.get("id") or "") if isinstance(data, dict) else ""
+
+
+def evo_send_text(to_e164, text):
+    return _msg_id(_evo("message/sendText", {"number": _digits(to_e164), "text": text}))
+
+
+@lru_cache(maxsize=2)
+def _b64(path, mtime):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+def evo_send_document(to_e164, path, filename, caption=""):
+    payload = {
+        "number": _digits(to_e164),
+        "mediatype": "document",
+        "mimetype": "application/pdf",
+        "fileName": filename,
+        "media": _b64(path, os.path.getmtime(path)),
+    }
+    if caption:
+        payload["caption"] = caption
+    return _msg_id(_evo("message/sendMedia", payload, timeout=120))
+
+
+def evo_check_numbers(numbers_e164):
+    """Quais números têm WhatsApp. Devolve {dígitos: bool}."""
+    data = _evo("chat/whatsappNumbers", {"numbers": [_digits(n) for n in numbers_e164]})
+    out = {}
+    for d in data if isinstance(data, list) else []:
+        digits = _digits(str(d.get("number") or str(d.get("jid", "")).split("@")[0]))
+        if digits:
+            out[digits] = bool(d.get("exists"))
+    return out

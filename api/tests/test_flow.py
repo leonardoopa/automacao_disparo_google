@@ -158,5 +158,124 @@ def test_pdf_missing_file_is_a_clear_error(client, monkeypatch, tmp_path):
     assert r.status_code == 400 and "PDF não encontrado" in r.json()["detail"]
 
 
+@pytest.fixture
+def evo(client, monkeypatch, tmp_path):
+    """Provider Evolution com 3 celulares e 1 fixo coletados; textos em tmp_path."""
+    rows = [
+        csv_row("a", "612 00 00 01"), csv_row("c", "612 00 00 03"), csv_row("d", "612 00 00 04"),
+        csv_row("f", "933 37 12 34"),
+    ]
+    monkeypatch.setattr(collector, "run_job", lambda body: rows)
+    for k, v in {"PROVIDER": "evolution", "EVO_URL": "http://evo", "EVO_KEY": "k", "EVO_INSTANCE": "i",
+                 "EVO_WEBHOOK_TOKEN": "segredo", "TEMPLATES_DIR": str(tmp_path), "DAILY_SEND_LIMIT": 0}.items():
+        monkeypatch.setattr(main.config, k, v)
+    (tmp_path / "euno.txt").write_text("Hola, {name}!\nVi {name} en Google.\n", encoding="utf-8")
+    client.post("/collect", json={"lat": ORIGIN[0], "lon": ORIGIN[1], "grid": 1})
+    for pid in "acdf":
+        client.patch(f"/leads/{pid}", json={"consent": True, "consent_source": "visita"})
+    return client
+
+
+def evo_hook(client, jid, text, token="segredo", from_me=False, ext=False):
+    msg = {"extendedTextMessage": {"text": text}} if ext else {"conversation": text}
+    body = {"event": "MESSAGES_UPSERT", "data": {"key": {"remoteJid": jid, "fromMe": from_me}, "message": msg}}
+    return client.post("/webhook/evolution", params={"token": token}, json=body)
+
+
+def test_evolution_text_uses_file_name_and_daily_cap(evo, monkeypatch):
+    sent = []
+    monkeypatch.setattr(whatsapp, "evo_send_text", lambda to, text: sent.append((to, text)) or "id.1")
+    monkeypatch.setattr(main.config, "DAILY_SEND_LIMIT", 2)
+
+    dry = evo.post("/messages/send", json={"template": "euno"}).json()
+    assert dry["eligible"] == 2 and dry["daily_remaining"] == 2  # teto de 2 já vale no dry-run; fixo f fica de fora
+    first = evo.post("/messages/send", json={"template": "euno", "dry_run": False}).json()
+    assert len(first["sent"]) == 2 and first["daily_remaining"] == 0
+    assert sent[0] == ("+34612000001", "Hola, Super a!\nVi Super a en Google.")
+    assert evo.post("/messages/send", json={"template": "euno", "dry_run": False}).json()["eligible"] == 0  # teto
+
+    monkeypatch.setattr(main.config, "DAILY_SEND_LIMIT", 0)
+    custom = {"template": "euno", "text": "Hola {name}", "dry_run": False}
+    assert len(evo.post("/messages/send", json=custom).json()["sent"]) == 1  # sobra o d
+    assert sent[2] == ("+34612000004", "Hola Super d")
+
+
+def test_evolution_missing_text_and_bad_template_name(evo):
+    assert evo.post("/messages/send", json={"template": "nao-existe"}).status_code == 400
+    assert evo.post("/messages/send", json={"template": "../etc/passwd"}).status_code == 422
+
+
+def test_evolution_webhook_reply_opt_out_and_pdf(evo, monkeypatch, tmp_path):
+    pdf = tmp_path / "euno.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(main.config, "WA_PDF_PATH", str(pdf))
+    docs = []
+    monkeypatch.setattr(whatsapp, "evo_send_text", lambda *a: "id")
+    monkeypatch.setattr(whatsapp, "evo_send_document", lambda *a: docs.append(a) or "id.d")
+    evo.post("/messages/send", json={"template": "euno", "dry_run": False})
+
+    assert evo_hook(evo, "34612000001@s.whatsapp.net", "x", token="errado").status_code == 403
+    evo_hook(evo, "34612000001@s.whatsapp.net", "Sí, envíamelo", ext=True)
+    evo_hook(evo, "34612000003@s.whatsapp.net", "BAJA")
+    evo_hook(evo, "34612000004@s.whatsapp.net", "ok", from_me=True)  # mensagem nossa: ignora
+    evo_hook(evo, "999@lid", "ok")  # sem telefone: ignora
+
+    dry = evo.post("/messages/send-pdf", json={}).json()
+    assert [(x["name"], x["last_reply"]) for x in dry["sent"]] == [("Super a", "sí, envíamelo")]
+    real = evo.post("/messages/send-pdf", json={"dry_run": False}).json()
+    assert len(real["sent"]) == 1 and docs[0][0] == "+34612000001" and docs[0][2] == "euno.pdf"
+    assert evo.post("/messages/send-pdf", json={"dry_run": False}).json()["eligible"] == 0
+
+
+def test_check_whatsapp_makes_landline_eligible_and_drops_mobile_without_it(evo, monkeypatch):
+    monkeypatch.setattr(whatsapp, "evo_check_numbers", lambda nums: {"34933371234": True, "34612000001": False})
+    r = evo.post("/leads/check-whatsapp", json={"include_mobile": True}).json()
+    assert r["on_whatsapp"] == ["+34933371234"] and r["not_on_whatsapp"] == 1 and r["no_answer"] == 2
+    phones = [x["phone"] for x in evo.post("/messages/send", json={"template": "euno"}).json()["sent"]]
+    assert "+34933371234" in phones and "+34612000001" not in phones
+    assert evo.get("/leads", params={"has_whatsapp": True}).json()["total"] == 1
+    # quem já foi checado não é consultado de novo
+    assert evo.post("/leads/check-whatsapp", json={"include_mobile": True}).json()["asked"] == 2
+
+
+def test_check_whatsapp_needs_evolution(client):
+    assert client.post("/leads/check-whatsapp", json={}).status_code == 400
+
+
+def test_evolution_client_request_shapes(monkeypatch, tmp_path):
+    for k, v in {"EVO_URL": "http://evo", "EVO_KEY": "k", "EVO_INSTANCE": "inst"}.items():
+        monkeypatch.setattr(whatsapp.config, k, v)
+    calls = []
+
+    class Resp:
+        def __init__(self, data):
+            self.data = data
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.data
+
+    def fake_post(url, headers, json, timeout):
+        calls.append((url, headers, json))
+        if url.endswith("whatsappNumbers/inst"):
+            return Resp([{"jid": "34933371234@s.whatsapp.net", "exists": True, "number": "34933371234"},
+                         {"jid": "34911111111@s.whatsapp.net", "exists": False, "number": "34911111111"}])
+        return Resp({"key": {"id": "ABC"}})
+
+    monkeypatch.setattr(whatsapp.httpx, "post", fake_post)
+    assert whatsapp.evo_send_text("+34 612 00 00 01", "oi") == "ABC"
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+    whatsapp.evo_send_document("+34612000001", str(pdf), "x.pdf", "legenda")
+    assert whatsapp.evo_check_numbers(["+34933371234", "+34911111111"]) == {"34933371234": True, "34911111111": False}
+    assert calls[0] == ("http://evo/message/sendText/inst", {"apikey": "k"}, {"number": "34612000001", "text": "oi"})
+    assert calls[1][0] == "http://evo/message/sendMedia/inst"
+    assert calls[1][2] == {"number": "34612000001", "mediatype": "document", "mimetype": "application/pdf",
+                           "fileName": "x.pdf", "media": "JVBERg==", "caption": "legenda"}
+    assert calls[2][2] == {"numbers": ["34933371234", "34911111111"]}
+
+
 def test_send_real_requires_credentials(client):
     assert client.post("/messages/send", json={"template": "t", "dry_run": False}).status_code == 400
