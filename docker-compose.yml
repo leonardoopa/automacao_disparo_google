@@ -38,7 +38,67 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
 
+  # Evolution API local (opcional): docker compose --profile evolution up -d
+  # Porta 8081 só em 127.0.0.1. Conecte o número lendo o QR em http://127.0.0.1:8081/manager
+  evolution-postgres:
+    profiles: [evolution]
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: evolution
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: ${EVOLUTION_DB_PASSWORD:-}
+    volumes:
+      - evolution_pg:/var/lib/postgresql/data
+
+  evolution-redis:
+    profiles: [evolution]
+    image: redis:7
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - evolution_redis:/data
+
+  evolution-api:
+    profiles: [evolution]
+    image: evoapicloud/evolution-api:v2.3.7
+    restart: unless-stopped
+    depends_on:
+      - evolution-postgres
+      - evolution-redis
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - evolution_instances:/evolution/instances
+    environment:
+      SERVER_URL: http://127.0.0.1:8081
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://evolution:${EVOLUTION_DB_PASSWORD:-}@evolution-postgres:5432/evolution?schema=evolution_api
+      DATABASE_CONNECTION_CLIENT_NAME: euno
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://evolution-redis:6379/6
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: "false"
+      CACHE_LOCAL_ENABLED: "false"
+      # Só as respostas recebidas chegam à nossa API, pela rede interna do compose
+      WEBHOOK_GLOBAL_ENABLED: "true"
+      WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"  # senão a Evolution cola /nome-do-evento na URL e quebra o ?token=
+      WEBHOOK_GLOBAL_URL: http://api:8000/webhook/evolution?token=${EVOLUTION_WEBHOOK_TOKEN:-}
+      WEBHOOK_EVENTS_MESSAGES_UPSERT: "true"
+      CONFIG_SESSION_PHONE_CLIENT: Euno
+      CONFIG_SESSION_PHONE_NAME: Chrome
+
 volumes:
   gmaps_data:
   gmaps_cache:
   mongo_data:
+  evolution_pg:
+  evolution_redis:
+  evolution_instances:
