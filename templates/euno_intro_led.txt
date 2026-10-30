@@ -1,0 +1,7 @@
+Hola, {name}, ¿qué tal? Soy Hugo, de Euno.
+
+Vi {name} en Google y quería hacerle una pregunta rápida: ¿hoy en día todavía cambian a mano los carteles de ofertas en papel?
+
+Trabajamos con paneles LED de alto brillo para el escaparate y con pantallas digitales para frutería, carnicería y cajas. Las ofertas se cambian en minutos, sin imprenta ni rotulista, y el consumo de energía es bajo. Incluso se puede vender espacio en las pantallas a marcas proveedoras para que anuncien dentro de la tienda.
+
+He preparado un material breve que muestra cómo funciona. ¿Puedo enviarle el PDF por aquí para que le eche un vistazo?
